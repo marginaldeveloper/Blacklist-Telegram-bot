@@ -508,7 +508,11 @@ async def add_user(message: types.Message, state: FSMContext):
 
 @dp.message(Form.adding_user_name)
 async def process_add_user_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
+
+    user_name = message.text.strip().title()
+
+
+    await state.update_data(name=user_name)
     await state.set_state(Form.adding_user_description)
     await message.answer("Введите описание пользователя:")
 
@@ -636,18 +640,24 @@ async def search_user(message: types.Message, state: FSMContext):
 
 @dp.message(Form.searching_user)
 async def process_search_user(message: types.Message, state: FSMContext):
-    search_term = message.text.lower()
+    search_term = message.text.strip()
+
+
+    if not any(char.isdigit() for char in search_term):  
+        search_term = search_term.title()  
+
     query = f"%{search_term}%"
 
     try:
+     
         user_id = int(message.text)
         cursor.execute(
-            "SELECT * FROM users WHERE id = ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?", 
+            "SELECT * FROM users WHERE id = ? OR name LIKE ? OR description LIKE ?", 
             (user_id, query, query)
         )
     except ValueError:
         cursor.execute(
-            "SELECT * FROM users WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ?", 
+            "SELECT * FROM users WHERE name LIKE ? OR description LIKE ?", 
             (query, query)
         )
 
@@ -663,8 +673,8 @@ async def process_search_user(message: types.Message, state: FSMContext):
             "🔎 Результаты поиска:\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🆔 ID: {user[0]}\n"
-            f"📛 Имя: {user[1]}\n"
-            f"📝 Описание: {user[2]}\n"
+            f"📛 Имя: {user[1]}\n" 
+            f"📝 Описание: {user[2]}\n"  
             f"📂 Документы: {user[3]}\n"
             f"👤 Добавил: ID:{user[5]} (@{user[6]})\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -681,6 +691,9 @@ async def process_search_user(message: types.Message, state: FSMContext):
             await message.answer(response, parse_mode="HTML")
 
     await state.set_state(Form.viewing_photos)
+
+
+
 
 
 
@@ -727,7 +740,7 @@ async def list_bot_users(message: types.Message, state: FSMContext):
 
 
 async def send_bot_users_page(message: types.Message, users, page):
-    per_page = 5  # Количество пользователей на одной странице
+    per_page = 5  
     start = page * per_page
     end = start + per_page
     page_users = users[start:end]
