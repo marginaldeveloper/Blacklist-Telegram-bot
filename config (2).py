@@ -17,6 +17,7 @@ projects = {
 
 
 
+import json
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram import F
@@ -30,7 +31,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import asyncio
-
+from aiogram.fsm.state import State, StatesGroup
 conn = sqlite3.connect('users.db')
 cursor = conn.cursor()
 cursor.execute('''
@@ -39,8 +40,18 @@ cursor.execute('''
         name TEXT,
         description TEXT,
         documents TEXT,
-        photo TEXT       
+        photo TEXT,
+        added_by_id INTEGER,
+        added_by_username TEXT       
     )
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    file_id TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+)
 ''')
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS botusers (
@@ -81,6 +92,7 @@ class Form(StatesGroup):
     chat_session = State()
     adding_user_photo = State()
     editing_user_id = State()  
+    viewing_photos = State()
     editing_user_field = State() 
     editing_user_value = State()  
 
@@ -89,7 +101,7 @@ global_admin_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📜 Список ЧС"), KeyboardButton(text="🛠️ Список менеджеров")],
         [KeyboardButton(text="👤 Добавить В ЧС"), KeyboardButton(text="❌ Удалить из ЧС")],
-        [KeyboardButton(text="🔍 Поиск пользователя"), KeyboardButton(text="🆔 Узнать свой ID")],
+        [KeyboardButton(text="🔍 Поиск клиента"), KeyboardButton(text="🆔 Узнать свой ID")],
         [KeyboardButton(text="👥 Пользователи бота")],
         [KeyboardButton(text="📌 Другие проекты")]
     ],
@@ -99,7 +111,7 @@ global_admin_kb = ReplyKeyboardMarkup(
 admin_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📜 Список ЧС"), KeyboardButton(text="👤 Добавить В ЧС")],
-        [KeyboardButton(text="❌ Удалить из ЧС"), KeyboardButton(text="🔍 Поиск пользователя")],
+        [KeyboardButton(text="❌ Удалить из ЧС"), KeyboardButton(text="🔍 Поиск клиента")],
         [KeyboardButton(text="🆔 Узнать свой ID")],
         [KeyboardButton(text="📌 Другие проекты")]
     ],
@@ -108,7 +120,7 @@ admin_kb = ReplyKeyboardMarkup(
 
 user_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🔍 Поиск пользователя"), KeyboardButton(text="🆔 Узнать свой ID")],
+        [KeyboardButton(text="🔍 Поиск клиента"), KeyboardButton(text="🆔 Узнать свой ID")],
         [KeyboardButton(text="📌 Другие проекты")]
     ],
     resize_keyboard=True
@@ -215,7 +227,7 @@ async def list_admins(message: types.Message):
 
 @dp.message(F.text == "📜 Список ЧС")
 async def list_blacklist(message: types.Message, state: FSMContext):
-    cursor.execute("SELECT id, name, description FROM users")
+    cursor.execute("SELECT id, name, description, added_by_id, added_by_username FROM users")
     users = cursor.fetchall()
     if not users:
         await message.answer("❌ ЧС пуст.")
@@ -224,34 +236,109 @@ async def list_blacklist(message: types.Message, state: FSMContext):
     await send_blacklist_page(message, users, 0)
 
 async def send_blacklist_page(message: types.Message, users, page):
-    per_page = 5
+    per_page = 2
     start = page * per_page
     end = start + per_page
     page_users = users[start:end]
 
-    response = (
-        f"📜 Список ЧС (стр. {page + 1})\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(
-            [
-                f"🔹 ID: {user[0]}\n"
-                f"   🏷 Имя: {user[1]}\n"
-                f"   📌 Описание: {user[2]}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━"
-                for user in page_users
-            ]
+    response = f"📜 Список ЧС (стр. {page + 1})\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    keyboard_buttons = []
+
+    for user in page_users:
+        response += (
+            f"🔹 ID: {user[0]}\n"
+            f"   🏷 Имя: {user[1]}\n"
+            f"   📌 Описание: {user[2]}\n"
+            f"👤 Добавил: @{user[4]} (ID: {user[3]})\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
         )
+
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text="🔍 Подробнее", 
+                callback_data=f"user_details_{user[0]}"
+            ),
+            InlineKeyboardButton(
+                text="✏️ Редактировать", 
+                callback_data=f"edit_user_{user[0]}"
+            )
+        ])
+
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blacklist_page_{page - 1}"))
+    if end < len(users):
+        nav_buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"blacklist_page_{page + 1}"))
+
+    if nav_buttons:
+        keyboard_buttons.append(nav_buttons)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("blacklist_page_"))
+async def change_blacklist_page(callback: types.CallbackQuery, state: FSMContext):
+    page = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    users = data.get("users", [])
+    await callback.message.delete()
+    await send_blacklist_page(callback.message, users, page)
+
+@dp.callback_query(F.data.startswith("user_details_"))
+async def user_details(callback: types.CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split("_")[-1])
+    cursor.execute("SELECT name, description, documents, photo, added_by_id, added_by_username FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден.")
+        return
+
+    name, description, documents, photo, added_by_id, added_by_username = user
+
+
+    cursor.execute("SELECT file_id FROM photos WHERE user_id = ?", (user_id,))
+    photos = cursor.fetchall()
+
+
+    response = (
+        f"🔍 <b>Детали пользователя</b>\n"
+        f"🏷 Имя: {name}\n"
+        f"📌 Описание: {description}\n"
+        f"📄 Документы: {documents}\n"
+        f"👤 Добавил: @{added_by_username} (ID: {added_by_id})"
     )
 
-    buttons = []
-    if page > 0:
-        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"blacklist_page_{page - 1}"))
-    if end < len(users):
-        buttons.append(InlineKeyboardButton(text="➡️ Вперед", callback_data=f"blacklist_page_{page + 1}"))
-    buttons.append(InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_user"))
+    if photos:
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-    await message.answer(response, reply_markup=keyboard)
+        await state.update_data(photo_index=0, photos=[p[0] for p in photos], response=response)
+        first_photo_id = photos[0][0]
+        await send_photo_with_nav(callback.message.chat.id, first_photo_id, response, 0, len(photos))
+    else:
+
+        if photo:
+            await callback.message.answer_photo(
+                photo=photo,
+                caption=response,
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer(response, parse_mode="HTML")
+
+    await callback.answer()  
+
+async def send_photo_with_nav(chat_id, file_id, caption, index, total):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️", callback_data="prev_photo"),
+            InlineKeyboardButton(text=f"{index + 1}/{total}", callback_data="noop"),
+            InlineKeyboardButton(text="▶️", callback_data="next_photo")
+        ]
+    ])
+    await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=keyboard, parse_mode="HTML")
+
 
 @dp.callback_query(F.data.startswith("blacklist_page_"))
 async def blacklist_pagination(callback: CallbackQuery, state: FSMContext):
@@ -266,6 +353,7 @@ async def blacklist_pagination(callback: CallbackQuery, state: FSMContext):
 async def edit_user_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(Form.editing_user_id)
     await callback.message.answer("📌 Введите ID пользователя для редактирования:")
+    await callback.answer()
 
 @dp.message(Form.editing_user_id)
 async def process_edit_user_id(message: types.Message, state: FSMContext):
@@ -273,13 +361,14 @@ async def process_edit_user_id(message: types.Message, state: FSMContext):
     user = cursor.fetchone()
     if not user:
         await message.answer("❌ Пользователь не найден.")
+        await state.clear()
         return
     await state.update_data(user_id=message.text)
     buttons = [
-        InlineKeyboardButton(text="✔️ Да", callback_data="confirm_edit"),
-        InlineKeyboardButton(text="❌ Нет", callback_data="cancel_edit"),
+        [InlineKeyboardButton(text="✔️ Да", callback_data="confirm_edit")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data="cancel_edit")]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
         f"🔹 Найден пользователь:\n🏷 Имя: {user[0]}\n📌 Описание: {user[1]}\nРедактировать?",
         reply_markup=keyboard
@@ -289,10 +378,10 @@ async def process_edit_user_id(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "confirm_edit")
 async def confirm_edit(callback: CallbackQuery, state: FSMContext):
     buttons = [
-        InlineKeyboardButton(text="🏷 Имя", callback_data="edit_name"),
-        InlineKeyboardButton(text="📌 Описание", callback_data="edit_description"),
+        [InlineKeyboardButton(text="🏷 Имя", callback_data="edit_name")],
+        [InlineKeyboardButton(text="📌 Описание", callback_data="edit_description")]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.answer("📝 Выберите поле для изменения:", reply_markup=keyboard)
     await callback.answer()
 
@@ -300,6 +389,29 @@ async def confirm_edit(callback: CallbackQuery, state: FSMContext):
 async def cancel_edit(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("❌ Отмена редактирования.")
     await state.clear()
+    await callback.answer()
+@dp.callback_query(F.data.startswith("edit_user_"))
+async def edit_user_from_list(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.data.split("_")[-1]
+    cursor.execute("SELECT name, description FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+
+    if not user:
+        await callback.message.answer("❌ Пользователь не найден.")
+        await callback.answer()
+        return
+
+    await state.update_data(user_id=user_id)
+    buttons = [
+        [InlineKeyboardButton(text="✔️ Да", callback_data="confirm_edit")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data="cancel_edit")]
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.answer(
+        f"🔹 Найден пользователь:\n🏷 Имя: {user[0]}\n📌 Описание: {user[1]}\nРедактировать?",
+        reply_markup=keyboard
+    )
+    await state.set_state(Form.editing_user_field)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("edit_"))
@@ -312,6 +424,7 @@ async def process_edit_user_field(callback: CallbackQuery, state: FSMContext):
     await state.update_data(editing_field=field)
     await callback.message.answer("✏️ Введите новое значение:")
     await state.set_state(Form.editing_user_value)
+    await callback.answer()
 
 @dp.message(Form.editing_user_value)
 async def process_edit_user_value_final(message: types.Message, state: FSMContext):
@@ -414,19 +527,12 @@ async def process_add_user_documents(message: types.Message, state: FSMContext):
     await message.answer("📸 Отправьте фото пользователя или нажмите '📭 Пропустить'.", reply_markup=skip_photo_kb)
 
 
-@dp.message(Form.adding_user_photo, F.photo)
-async def process_add_user_photo(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    await save_user_to_db(state, photo_id)
-    await message.answer("✅ Пользователь добавлен.", reply_markup=admin_kb)
-    await state.clear()
-
-
 @dp.message(Form.adding_user_photo, F.text == "📭 Пропустить")
 async def process_skip_photo(message: types.Message, state: FSMContext):
-    await save_user_to_db(state, photo_id=None)
+    await save_user_to_db(state, None, message.from_user.id, message.from_user.username)  
     await message.answer("✅ Пользователь добавлен без фото.", reply_markup=admin_kb)
     await state.clear()
+
 
 
 @dp.message(F.text == "❌ Отмена")
@@ -435,13 +541,53 @@ async def cancel_process(message: types.Message, state: FSMContext):
     await message.answer("❌ Действие отменено.", reply_markup=admin_kb)
 
 
-async def save_user_to_db(state, photo_id):
+async def save_user_to_db(state, photo_ids_json, admin_id, admin_username):
     data = await state.get_data()
+
+
     cursor.execute(
-        "INSERT INTO users (name, description, documents, photo) VALUES (?, ?, ?, ?)",
-        (data['name'], data['description'], data['documents'], photo_id)
+        "INSERT INTO users (name, description, documents, photo, added_by_id, added_by_username) VALUES (?, ?, ?, ?, ?, ?)",
+        (data['name'], data['description'], data['documents'], photo_ids_json, admin_id, admin_username)
     )
     conn.commit()
+
+
+    user_id = cursor.lastrowid
+
+
+    if photo_ids_json:
+        photo_ids = json.loads(photo_ids_json)
+        for photo_id in photo_ids:
+            cursor.execute("INSERT INTO photos (user_id, file_id) VALUES (?, ?)", (user_id, photo_id))
+        conn.commit()
+
+
+
+@dp.message(Form.adding_user_photo, F.photo)
+async def process_add_user_photo(message: types.Message, state: FSMContext):
+    photo_id = message.photo[-1].file_id
+    data = await state.get_data()
+    photos = data.get('photos', [])
+    photos.append(photo_id)
+    await state.update_data(photos=photos)
+    await message.answer("📸 Фото добавлено. Вы можете отправить ещё или нажмите '✅ Завершить'", reply_markup=finish_photo_kb)
+
+finish_photo_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Завершить")],
+        [KeyboardButton(text="❌ Отмена")]
+    ],
+    resize_keyboard=True
+)
+
+@dp.message(Form.adding_user_photo, F.text == "✅ Завершить")
+async def process_finish_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get('photos', [])
+    photos_json = json.dumps(photos)
+    await save_user_to_db(state, photos_json, message.from_user.id, message.from_user.username)
+    await message.answer("✅ Пользователь добавлен.", reply_markup=admin_kb)
+    await state.clear()
 
 
 
@@ -483,38 +629,79 @@ async def process_delete_user(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Ошибка! Введите числовой ID.")
 
-@dp.message(F.text == "🔍 Поиск пользователя")
+@dp.message(F.text == "🔍 Поиск клиента")
 async def search_user(message: types.Message, state: FSMContext):
     await state.set_state(Form.searching_user)
-    await message.answer("Введите ID, имя или часть описания пользователя для поиска:")
+    await message.answer("Введите ID, имя или часть описания клиента для поиска:")
 
 @dp.message(Form.searching_user)
 async def process_search_user(message: types.Message, state: FSMContext):
-    query = f"%{message.text}%"
-    cursor.execute(
-        "SELECT * FROM users WHERE id = ? OR name LIKE ? OR description LIKE ?", 
-        (message.text, query, query)
-    )
+    search_term = message.text.lower()
+    query = f"%{search_term}%"
+
+    try:
+        user_id = int(message.text)
+        cursor.execute(
+            "SELECT * FROM users WHERE id = ? OR LOWER(name) LIKE ? OR LOWER(description) LIKE ?", 
+            (user_id, query, query)
+        )
+    except ValueError:
+        cursor.execute(
+            "SELECT * FROM users WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ?", 
+            (query, query)
+        )
+
     users = cursor.fetchall()
 
-    if users:
-        response = "🔎 Результаты поиска:\n"
-        response += "━━━━━━━━━━━━━━━━━━━━━━\n"
-        for user in users:
-            response += (
-                f"🆔 ID:{user[0]}\n"
-                f"📛 Имя:{user[1]}\n"
-                f"📝 Описание: {user[2]}\n"
-                f"📂 Документы: {user[3]}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-            )
-            if user[4]:  
-                await bot.send_photo(message.chat.id, user[4])
-        await message.answer(response, parse_mode="HTML")
-    else:
+    if not users:
         await message.answer("❌ Пользователь не найден.")
+        return await state.clear()
 
-    await state.clear()
+    for user in users:
+        user_id = user[0]
+        response = (
+            "🔎 Результаты поиска:\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: {user[0]}\n"
+            f"📛 Имя: {user[1]}\n"
+            f"📝 Описание: {user[2]}\n"
+            f"📂 Документы: {user[3]}\n"
+            f"👤 Добавил: ID:{user[5]} (@{user[6]})\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+        cursor.execute("SELECT file_id FROM photos WHERE user_id = ?", (user_id,))
+        photos = cursor.fetchall()
+
+        if photos:
+            await state.update_data(photo_index=0, photos=[p[0] for p in photos], response=response)
+            first_photo_id = photos[0][0]
+            await send_photo_with_nav(message.chat.id, first_photo_id, response, 0, len(photos))
+        else:
+            await message.answer(response, parse_mode="HTML")
+
+    await state.set_state(Form.viewing_photos)
+
+
+
+@dp.callback_query(F.data.in_({"next_photo", "prev_photo"}))
+async def navigate_photos(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    index = data.get("photo_index", 0)
+    response = data.get("response", "")
+
+    if not photos:
+        return await callback.answer("Нет фото")
+
+    if callback.data == "next_photo":
+        index = (index + 1) % len(photos)
+    elif callback.data == "prev_photo":
+        index = (index - 1) % len(photos)
+
+    await state.update_data(photo_index=index)
+    await callback.message.delete()  
+    await send_photo_with_nav(callback.message.chat.id, photos[index], response, index, len(photos))
 
 @dp.message(F.text == "🆔 Узнать свой ID")
 async def get_user_id(message: types.Message):
